@@ -22,7 +22,7 @@ import {
 import PageLayout from '../components/PageLayout.vue'
 
 // Keep requests on the current host so Vite/ngrok can proxy /api to FastAPI.
-const API_BASE_URL = ''
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
 
 const router = useRouter()
 

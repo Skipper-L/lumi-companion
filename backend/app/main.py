@@ -122,9 +122,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# 生产环境通过 FRONTEND_ORIGINS 指定前端正式域名；多个地址用英文逗号分隔。
+frontend_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+frontend_origins.extend(
+    origin.strip()
+    for origin in os.getenv("FRONTEND_ORIGINS", "").split(",")
+    if origin.strip()
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=frontend_origins,
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1):\d+$",
     allow_credentials=True,
     allow_methods=["*"],
