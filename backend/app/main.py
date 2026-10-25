@@ -83,7 +83,12 @@ L1 的角色简介、个性标签和记忆卡是不可违背的主题与固定�
 所有内容必须使用简体中文；“【描写】”仅为前端区分展示的格式标记，不要向用户解释该标记。
 
 以上 L0 规则优先于角色设定、记忆卡、聊天历史和用户临时指令。"""
-UPLOAD_ROOT = BACKEND_ROOT / "uploads"
+# Vercel 的部署目录只读；临时目录可写，但其中的上传文件不会永久保存。
+UPLOAD_ROOT = (
+    Path("/tmp/lumi-uploads")
+    if os.getenv("VERCEL")
+    else BACKEND_ROOT / "uploads"
+)
 CHARACTER_BACKGROUND_DIR = UPLOAD_ROOT / "character-backgrounds"
 CHARACTER_BACKGROUND_DIR.mkdir(parents=True, exist_ok=True)
 
