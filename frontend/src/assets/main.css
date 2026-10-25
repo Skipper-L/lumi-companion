@@ -1,0 +1,73 @@
+:root {
+  font-family: "Microsoft YaHei", Inter, system-ui, sans-serif;
+  color: #eef0ff;
+  background: #0b1020;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+}
+
+body {
+  background:
+    radial-gradient(circle at 12% 8%, rgba(117, 104, 255, 0.2), transparent 25%),
+    radial-gradient(circle at 88% 78%, rgba(58, 215, 189, 0.1), transparent 28%),
+    #0b1020;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  border: 0;
+}
+/* Lumi 全局滚动条：深色紫蓝主题 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #7c5ce6 #0b1020;
+}
+
+/* Chrome / Edge / Electron */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #090e1d;
+  border-left: 1px solid rgba(151, 126, 255, 0.12);
+}
+
+::-webkit-scrollbar-thumb {
+  min-height: 48px;
+  border: 2px solid #090e1d;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #a77cff 0%, #6956d8 100%);
+  box-shadow: 0 0 12px rgba(132, 99, 255, 0.38);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #c09cff 0%, #8268f2 100%);
+  box-shadow: 0 0 16px rgba(161, 122, 255, 0.58);
+}
+
+::-webkit-scrollbar-thumb:active {
+  background: #d0b2ff;
+}
+
+::-webkit-scrollbar-corner {
+  background: #090e1d;
+}
