@@ -1,14 +1,122 @@
 import json
+import os
 import sqlite3
+import ssl
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
+from dotenv import load_dotenv
 
-DATABASE_PATH = Path(__file__).resolve().parent.parent / "lumi.db"
+try:
+    import pg8000.dbapi as pg8000
+except ImportError:  # 本地仍可在未安装 PostgreSQL 驱动时使用 SQLite。
+    pg8000 = None
+
+
+BACKEND_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(BACKEND_ROOT / ".env")
+DATABASE_PATH = BACKEND_ROOT / "lumi.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+
+
+def using_postgres():
+    return DATABASE_URL.startswith(("postgres://", "postgresql://"))
+
+
+def get_postgres_ssl_context(parsed_url):
+    """按 PostgreSQL URL 的 sslmode 建立连接加密设置。
+
+    Supabase 提供的连接串通常带 ``sslmode=require``：它要求传输加密，
+    但不要求客户端额外校验证书链。这兼容部分 Windows 网络环境的自签名
+    代理证书。未声明该模式时仍采用严格的系统证书校验。
+    """
+    verify_setting = os.getenv("DATABASE_SSL_VERIFY", "").strip().lower()
+    if verify_setting in {"0", "false", "no"}:
+        return ssl._create_unverified_context()
+
+    ssl_mode = parse_qs(parsed_url.query).get("sslmode", [""])[0].lower()
+    if ssl_mode == "disable":
+        return None
+    if ssl_mode in {"require", "allow", "prefer"}:
+        return ssl._create_unverified_context()
+    return ssl.create_default_context()
+
+
+class PostgresCursor:
+    """将现有 SQLite 风格的 ? 占位符平滑适配为 PostgreSQL。"""
+
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def execute(self, query, params=None):
+        statement = query.replace("?", "%s")
+        if "INSERT OR IGNORE INTO" in statement.upper():
+            statement = statement.replace("INSERT OR IGNORE INTO", "INSERT INTO", 1)
+            statement = statement.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+        self._cursor.execute(statement, () if params is None else params)
+        return self
+
+    def _as_dict(self, row):
+        """让 pg8000 返回的元组与 sqlite3.Row 一样可按列名读取。"""
+        if row is None or isinstance(row, dict):
+            return row
+        columns = [column[0] for column in (self._cursor.description or [])]
+        return dict(zip(columns, row))
+
+    def fetchone(self):
+        return self._as_dict(self._cursor.fetchone())
+
+    def fetchall(self):
+        return [self._as_dict(row) for row in self._cursor.fetchall()]
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
+class PostgresConnection:
+    """提供与 sqlite3 足够接近的连接接口，减少业务层改动。"""
+
+    def __init__(self, connection):
+        self._connection = connection
+
+    def cursor(self):
+        return PostgresCursor(self._connection.cursor())
+
+    def execute(self, query, params=None):
+        cursor = self.cursor()
+        return cursor.execute(query, params)
+
+    def commit(self):
+        self._connection.commit()
+
+    def rollback(self):
+        self._connection.rollback()
+
+    def close(self):
+        self._connection.close()
 
 
 def get_connection():
+    if using_postgres():
+        if pg8000 is None:
+            raise RuntimeError(
+                "检测到 DATABASE_URL，但未安装 pg8000。请执行 pip install -r requirements.txt。"
+            )
+        parsed_url = urlparse(DATABASE_URL)
+        if not parsed_url.hostname or not parsed_url.username:
+            raise RuntimeError("DATABASE_URL 格式不正确，请重新复制 Supabase 的连接地址。")
+        connection = pg8000.connect(
+            user=unquote(parsed_url.username),
+            password=unquote(parsed_url.password or ""),
+            host=parsed_url.hostname,
+            port=parsed_url.port or 5432,
+            database=parsed_url.path.lstrip("/") or "postgres",
+            ssl_context=get_postgres_ssl_context(parsed_url),
+        )
+        return PostgresConnection(connection)
+
     connection = sqlite3.connect(DATABASE_PATH)
     connection.row_factory = sqlite3.Row
     return connection
@@ -23,6 +131,23 @@ def get_today():
 
 
 def add_column_if_not_exists(cursor, table_name, column_name, column_definition):
+    if using_postgres():
+        cursor.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = ?
+            """,
+            (table_name,),
+        )
+        columns = [column["column_name"] for column in cursor.fetchall()]
+        if column_name not in columns:
+            cursor.execute(
+                f"ALTER TABLE {table_name} "
+                f"ADD COLUMN {column_name} {column_definition}"
+            )
+        return
+
     cursor.execute(f"PRAGMA table_info({table_name})")
     columns = [column["name"] for column in cursor.fetchall()]
 
@@ -33,7 +158,130 @@ def add_column_if_not_exists(cursor, table_name, column_name, column_definition)
         )
 
 
+POSTGRES_SCHEMA_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS users (
+        id BIGSERIAL PRIMARY KEY,
+        username TEXT NOT NULL,
+        email TEXT,
+        password_hash TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)",
+    """
+    CREATE TABLE IF NOT EXISTS conversations (
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL REFERENCES users(id),
+        character_id TEXT NOT NULL,
+        title TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS messages (
+        id BIGSERIAL PRIMARY KEY,
+        conversation_id BIGINT NOT NULL REFERENCES conversations(id),
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS memberships (
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL REFERENCES users(id),
+        plan_name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'inactive',
+        started_at TEXT,
+        expires_at TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS custom_characters (
+        id TEXT PRIMARY KEY,
+        user_id BIGINT NOT NULL REFERENCES users(id),
+        name TEXT NOT NULL,
+        avatar TEXT NOT NULL,
+        color TEXT NOT NULL,
+        atmosphere TEXT NOT NULL,
+        speaking_style TEXT NOT NULL,
+        relationship TEXT NOT NULL,
+        opening TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        gender TEXT NOT NULL DEFAULT 'male',
+        background_image TEXT NOT NULL DEFAULT '',
+        greeting_image TEXT NOT NULL DEFAULT '',
+        boundaries TEXT NOT NULL DEFAULT '',
+        memory TEXT NOT NULL DEFAULT '',
+        memory_cards TEXT NOT NULL DEFAULT '[]',
+        personality_tags TEXT NOT NULL DEFAULT '[]',
+        visibility TEXT NOT NULL DEFAULT 'private',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK (visibility IN ('public', 'private')),
+        CHECK (gender IN ('male', 'female'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_custom_characters_user_id ON custom_characters(user_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_custom_characters_visibility ON custom_characters(visibility, created_at DESC)",
+    """
+    CREATE TABLE IF NOT EXISTS character_favorites (
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL REFERENCES users(id),
+        character_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (user_id, character_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS login_activity (
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL REFERENCES users(id),
+        login_date TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (user_id, login_date)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS diary_entries (
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL REFERENCES users(id),
+        diary_date TEXT NOT NULL,
+        content TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (user_id, diary_date)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_diary_entries_user_date ON diary_entries(user_id, diary_date DESC)",
+]
+
+
+def init_postgres_database():
+    connection = get_connection()
+    cursor = connection.cursor()
+    try:
+        for statement in POSTGRES_SCHEMA_STATEMENTS:
+            cursor.execute(statement)
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+    print("PostgreSQL 数据库已准备完成。")
+
+
 def init_database():
+    if using_postgres():
+        init_postgres_database()
+        return
+
     connection = get_connection()
     cursor = connection.cursor()
 
@@ -250,17 +498,35 @@ def create_user(username: str, email: str, password_hash: str):
     cursor = connection.cursor()
 
     try:
-        cursor.execute(
-            """
-            INSERT INTO users (username, email, password_hash, created_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (username, email, password_hash, get_now()),
-        )
-        user_id = cursor.lastrowid
+        if using_postgres():
+            cursor.execute(
+                """
+                INSERT INTO users (username, email, password_hash, created_at)
+                VALUES (?, ?, ?, ?)
+                RETURNING id
+                """,
+                (username, email, password_hash, get_now()),
+            )
+            user_id = cursor.fetchone()["id"]
+        else:
+            cursor.execute(
+                """
+                INSERT INTO users (username, email, password_hash, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (username, email, password_hash, get_now()),
+            )
+            user_id = cursor.lastrowid
         connection.commit()
         return {"id": user_id, "username": username, "email": email}
-    except sqlite3.IntegrityError:
+    except Exception as error:
+        integrity_error = (
+            isinstance(error, sqlite3.IntegrityError)
+            or getattr(error, "sqlstate", None) == "23505"
+            or error.__class__.__name__ == "IntegrityError"
+        )
+        if not integrity_error:
+            raise
         connection.rollback()
         return None
     finally:
@@ -355,14 +621,25 @@ def save_chat_turn(user_id: int, character_id: str, user_content: str, assistant
     conversation = cursor.fetchone()
 
     if conversation is None:
-        cursor.execute(
-            """
-            INSERT INTO conversations (user_id, character_id, title, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (user_id, character_id, "与角色的聊天", now, now),
-        )
-        conversation_id = cursor.lastrowid
+        if using_postgres():
+            cursor.execute(
+                """
+                INSERT INTO conversations (user_id, character_id, title, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                RETURNING id
+                """,
+                (user_id, character_id, "与角色的聊天", now, now),
+            )
+            conversation_id = cursor.fetchone()["id"]
+        else:
+            cursor.execute(
+                """
+                INSERT INTO conversations (user_id, character_id, title, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (user_id, character_id, "与角色的聊天", now, now),
+            )
+            conversation_id = cursor.lastrowid
     else:
         conversation_id = conversation["id"]
 

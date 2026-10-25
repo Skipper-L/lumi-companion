@@ -5,3 +5,5 @@ PyJWT
 python-dotenv
 python-multipart
 openai
+# 纯 Python PostgreSQL 驱动，不依赖 Windows 的 libpq 系统组件。
+pg8000
