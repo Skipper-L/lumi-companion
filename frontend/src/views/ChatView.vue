@@ -15,6 +15,7 @@ import {
   Volume2,
 } from 'lucide-vue-next'
 import PageLayout from '../components/PageLayout.vue'
+import { resolveImageUrl } from '../utils/imageUrl'
 
 // Keep requests on the current host so Vite/ngrok can proxy /api to FastAPI.
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
@@ -98,7 +99,7 @@ const characterDescription = computed(() => {
 })
 
 const characterAvatarImage = computed(() =>
-  selectedCharacter.value.background_image || '',
+  resolveImageUrl(selectedCharacter.value.background_image),
 )
 
 const currentUserId = computed(() => {
@@ -115,7 +116,7 @@ const canEditMemoryCards = computed(() =>
 )
 
 const chatBackgroundStyle = computed(() => {
-  const image = selectedCharacter.value.background_image
+  const image = resolveImageUrl(selectedCharacter.value.background_image)
   if (!image) return {}
 
   return {
@@ -141,7 +142,7 @@ function getOpeningMessage() {
       selectedCharacter.value.opening ||
       selectedCharacter.value.message ||
       `你好，我是${selectedCharacter.value.name}。今天想让我怎么陪着你？`,
-    image: selectedCharacter.value.greeting_image || '',
+    image: resolveImageUrl(selectedCharacter.value.greeting_image),
   }
 }
 

@@ -12,6 +12,7 @@ import {
 } from 'lucide-vue-next'
 import PageLayout from '../components/PageLayout.vue'
 import lumiMoonIcon from '../assets/lumi-default-cover.jpeg'
+import { resolveImageUrl } from '../utils/imageUrl'
 
 // Keep requests on the current host so Vite/ngrok can proxy /api to FastAPI.
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
@@ -191,10 +192,7 @@ function hasChatHistory(characterId) {
 }
 
 function getBackgroundImageUrl(character) {
-  if (!character.background_image) return ''
-  return character.background_image.startsWith('http')
-    ? character.background_image
-    : `${API_BASE_URL}${character.background_image}`
+  return resolveImageUrl(character.background_image)
 }
 
 async function loadCharacters() {
