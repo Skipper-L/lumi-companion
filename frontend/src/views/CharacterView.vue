@@ -200,38 +200,18 @@ async function loadCharacters() {
   errorMessage.value = ''
 
   try {
-    const [publicResponse, favoriteResponse, conversationResponse] = await Promise.all([
-      fetch(`${API_BASE_URL}/api/custom-characters/public`),
-      fetch(`${API_BASE_URL}/api/favorites`, {
-        headers: getHeaders(),
-      }),
-      fetch(`${API_BASE_URL}/api/conversations`, {
-        headers: getHeaders(),
-      }),
-    ])
+    const response = await fetch(`${API_BASE_URL}/api/character-square`, {
+      headers: getHeaders(),
+    })
+    const result = await response.json()
 
-    const publicResult = await publicResponse.json()
-    const favoriteResult = await favoriteResponse.json()
-    const conversationResult = conversationResponse.ok
-      ? await conversationResponse.json()
-      : null
-
-    if (!publicResponse.ok) {
-      throw new Error(publicResult.detail || '获取公开角色失败。')
+    if (!response.ok) {
+      throw new Error(result.detail || '获取角色广场失败。')
     }
 
-    publicCustomCharacters.value = publicResult.data || []
-
-    if (favoriteResponse.ok) {
-      favoriteIds.value = favoriteResult.data || []
-    }
-
-    // 会话状态仅属于当前登录账号：有历史消息才在广场卡片显示提示。
-    if (conversationResult?.success) {
-      chattedCharacterIds.value = (conversationResult.data || []).map(
-        (conversation) => conversation.character_id,
-      )
-    }
+    publicCustomCharacters.value = result.data?.characters || []
+    favoriteIds.value = result.data?.favorite_ids || []
+    chattedCharacterIds.value = result.data?.chatted_character_ids || []
   } catch (error) {
     errorMessage.value = error.message || '无法连接后端，请确认后端正在运行。'
   } finally {
@@ -382,11 +362,14 @@ onMounted(async () => {
               :src="lumiMoonIcon"
               alt="Lumi 默认角色封面"
             />
-            <div
+            <img
               v-if="character.background_image"
               class="card-cover"
-              :style="{ backgroundImage: `url(&quot;${getBackgroundImageUrl(character)}&quot;)` }"
-            ></div>
+              :src="getBackgroundImageUrl(character)"
+              :alt="`${character.name} 的角色封面`"
+              loading="lazy"
+              decoding="async"
+            />
             <div class="card-cover-shade"></div>
 
             <div class="card-top">
@@ -655,9 +638,10 @@ onMounted(async () => {
 }
 
 .card-cover {
-  background-position: center;
-  background-size: cover;
-  background-repeat: no-repeat;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .card-cover-shade {

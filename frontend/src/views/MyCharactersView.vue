@@ -165,21 +165,19 @@ async function loadPageData() {
   errorMessage.value = ''
 
   try {
-    const [myResponse, publicResponse, favoriteResponse] = await Promise.all([
+    const [myResponse, squareResponse] = await Promise.all([
       fetch(`${API_BASE_URL}/api/custom-characters/mine`, {
         headers: getHeaders(),
       }),
-      fetch(`${API_BASE_URL}/api/custom-characters/public`),
-      fetch(`${API_BASE_URL}/api/favorites`, {
+      fetch(`${API_BASE_URL}/api/character-square`, {
         headers: getHeaders(),
       }),
     ])
 
     const myResult = await myResponse.json()
-    const publicResult = await publicResponse.json()
-    const favoriteResult = await favoriteResponse.json()
+    const squareResult = await squareResponse.json()
 
-    if (myResponse.status === 401 || favoriteResponse.status === 401) {
+    if (myResponse.status === 401 || squareResponse.status === 401) {
       localStorage.removeItem('lumi_access_token')
       localStorage.removeItem('lumi_current_user')
 
@@ -192,8 +190,8 @@ async function loadPageData() {
     }
 
     myCharacters.value = myResult.data || []
-    publicCharacters.value = publicResult.data || []
-    favoriteIds.value = favoriteResult.data || []
+    publicCharacters.value = squareResult.data?.characters || []
+    favoriteIds.value = squareResult.data?.favorite_ids || []
   } catch (error) {
     errorMessage.value = error.message || '网络连接失败，请确认后端正在运行。'
   } finally {
@@ -401,10 +399,13 @@ onMounted(() => {
         >
           <div class="card-background"></div>
 
-          <div
+          <img
             class="card-cover"
-            :style="{ backgroundImage: 'url(' + getCharacterImageUrl(character) + ')' }"
-          ></div>
+            :src="getCharacterImageUrl(character)"
+            :alt="`${character.name} 的角色封面`"
+            loading="lazy"
+            decoding="async"
+          />
           <div class="card-cover-shade"></div>
 
           <div class="card-top">
@@ -657,9 +658,9 @@ onMounted(() => {
 
 .card-cover {
   z-index: 0;
-  background-position: center;
-  background-size: cover;
-  background-repeat: no-repeat;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .card-cover-shade {

@@ -1,5 +1,7 @@
 from contextlib import asynccontextmanager
 import os
+import time
+from threading import Lock
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -111,6 +113,12 @@ ALLOWED_IMAGE_TYPES = {
     "image/webp": ".webp",
 }
 MAX_BACKGROUND_IMAGE_SIZE = 5 * 1024 * 1024
+
+# 角色广场的公开数据变化不频繁。短缓存能避免每次打开页面都查询一次数据库，
+# 同时不影响创建或删除角色后立即看到最新结果。
+PUBLIC_CHARACTER_CACHE_TTL_SECONDS = 45
+_public_character_cache = {"value": None, "expires_at": 0.0}
+_public_character_cache_lock = Lock()
 
 
 @asynccontextmanager
@@ -232,6 +240,25 @@ def get_current_user(authorization: str | None = Header(default=None)):
         raise HTTPException(status_code=401, detail="登录凭证格式错误")
 
     return decode_access_token(authorization[len(prefix):])
+
+
+def get_cached_public_characters():
+    now = time.monotonic()
+    with _public_character_cache_lock:
+        if _public_character_cache["value"] is not None and now < _public_character_cache["expires_at"]:
+            return _public_character_cache["value"]
+
+    characters = get_public_custom_characters()
+    with _public_character_cache_lock:
+        _public_character_cache["value"] = characters
+        _public_character_cache["expires_at"] = now + PUBLIC_CHARACTER_CACHE_TTL_SECONDS
+    return characters
+
+
+def invalidate_public_character_cache():
+    with _public_character_cache_lock:
+        _public_character_cache["value"] = None
+        _public_character_cache["expires_at"] = 0.0
 
 
 def get_storage_public_url(file_name: str):
@@ -600,12 +627,14 @@ async def create_my_custom_character(
         data["avatar"] = data["name"][:1]
 
     character = create_custom_character(current_user["user_id"], data)
+    if character["visibility"] == "public":
+        invalidate_public_character_cache()
     return {"success": True, "message": "角色创建成功", "data": character}
 
 
 @app.get("/api/custom-characters/public")
 async def get_public_characters():
-    characters = get_public_custom_characters()
+    characters = get_cached_public_characters()
     return {"success": True, "data": characters, "total": len(characters)}
 
 
@@ -614,6 +643,31 @@ async def get_my_characters(authorization: str | None = Header(default=None)):
     current_user = get_current_user(authorization)
     characters = get_my_custom_characters(current_user["user_id"])
     return {"success": True, "data": characters, "total": len(characters)}
+
+
+@app.get("/api/character-square")
+async def get_character_square(authorization: str | None = Header(default=None)):
+    """一次返回广场展示所需的角色、收藏和会话状态。"""
+    characters = get_cached_public_characters()
+    favorite_ids = []
+    chatted_character_ids = []
+
+    if authorization:
+        current_user = get_current_user(authorization)
+        user_id = current_user["user_id"]
+        favorite_ids = get_favorite_character_ids(user_id)
+        chatted_character_ids = [
+            record["character_id"] for record in get_conversation_records(user_id)
+        ]
+
+    return {
+        "success": True,
+        "data": {
+            "characters": characters,
+            "favorite_ids": favorite_ids,
+            "chatted_character_ids": chatted_character_ids,
+        },
+    }
 
 
 @app.patch("/api/custom-characters/{character_id}/memory-cards")
@@ -654,6 +708,7 @@ async def delete_my_custom_character(
     deletion = delete_custom_character(current_user["user_id"], character_id)
     if deletion["deleted_count"] == 0:
         raise HTTPException(status_code=404, detail="角色不存在，或你没有删除这个角色的权限")
+    invalidate_public_character_cache()
     return {
         "success": True,
         "message": "角色已删除，同时清理了该账号下的相关会话记录",
