@@ -1,5 +1,8 @@
 from contextlib import asynccontextmanager
 import os
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -44,6 +47,9 @@ load_dotenv(BACKEND_ROOT / ".env")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip()
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com").strip()
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat").strip()
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "lumi-character-images").strip()
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
 # L0：Lumi 全局角色行为规则。
 # 这是服务端固定规则，不进入角色创建表单，也不接受前端传入内容覆盖。
@@ -228,10 +234,53 @@ def get_current_user(authorization: str | None = Header(default=None)):
     return decode_access_token(authorization[len(prefix):])
 
 
+def get_storage_public_url(file_name: str):
+    return (
+        f"{SUPABASE_URL}/storage/v1/object/public/"
+        f"{SUPABASE_STORAGE_BUCKET}/{quote(file_name)}"
+    )
+
+
+def upload_to_supabase_storage(file_name: str, content: bytes, content_type: str):
+    """将新上传的角色图片直接写入 Supabase Storage。"""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return None
+
+    endpoint = (
+        f"{SUPABASE_URL}/storage/v1/object/"
+        f"{SUPABASE_STORAGE_BUCKET}/{quote(file_name)}"
+    )
+    request = Request(
+        endpoint,
+        data=content,
+        headers={
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+            "Content-Type": content_type,
+            "x-upsert": "false",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=20):
+            pass
+    except (HTTPError, URLError, TimeoutError) as error:
+        raise HTTPException(status_code=502, detail="图片上传到云存储失败，请稍后重试") from error
+    return get_storage_public_url(file_name)
+
+
 def validate_background_image_url(image_url: str):
     """只允许角色使用本服务刚上传到指定目录的图片。"""
     if not image_url:
         return ""
+
+    public_prefix = (
+        f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_STORAGE_BUCKET}/"
+        if SUPABASE_URL
+        else ""
+    )
+    if public_prefix and image_url.startswith(public_prefix):
+        return image_url
 
     prefix = "/uploads/character-backgrounds/"
     if not image_url.startswith(prefix):
@@ -250,6 +299,13 @@ def validate_background_image_url(image_url: str):
 def validate_greeting_image_url(image_url: str):
     if not image_url:
         return ""
+    public_prefix = (
+        f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_STORAGE_BUCKET}/"
+        if SUPABASE_URL
+        else ""
+    )
+    if public_prefix and image_url.startswith(public_prefix):
+        return image_url
     prefix = "/uploads/greeting-images/"
     if not image_url.startswith(prefix):
         raise HTTPException(status_code=400, detail="问候图片地址无效")
@@ -461,16 +517,17 @@ async def upload_character_background(
 
     suffix = ALLOWED_IMAGE_TYPES[content_type]
     file_name = f"user_{current_user['user_id']}_{uuid4().hex}{suffix}"
-    file_path = CHARACTER_BACKGROUND_DIR / file_name
-
     try:
-        file_path.write_bytes(content)
+        image_url = upload_to_supabase_storage(file_name, content, content_type)
+        if image_url is None:
+            file_path = CHARACTER_BACKGROUND_DIR / file_name
+            file_path.write_bytes(content)
+            image_url = f"/uploads/character-backgrounds/{file_name}"
     except OSError as error:
         raise HTTPException(status_code=500, detail="图片保存失败，请稍后重试") from error
     finally:
         await file.close()
 
-    image_url = f"/uploads/character-backgrounds/{file_name}"
     return {"success": True, "message": "背景图上传成功", "data": {"image_url": image_url}}
 
 
@@ -486,14 +543,19 @@ async def upload_greeting_image(
     content = await file.read()
     if not content or len(content) > MAX_BACKGROUND_IMAGE_SIZE:
         raise HTTPException(status_code=400, detail="问候图片不能为空且不能超过 5MB")
-    directory = UPLOAD_ROOT / "greeting-images"
-    directory.mkdir(parents=True, exist_ok=True)
     file_name = f"greeting_{uuid4().hex}{ALLOWED_IMAGE_TYPES[content_type]}"
     try:
-        (directory / file_name).write_bytes(content)
+        image_url = upload_to_supabase_storage(file_name, content, content_type)
+        if image_url is None:
+            directory = UPLOAD_ROOT / "greeting-images"
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / file_name).write_bytes(content)
+            image_url = f"/uploads/greeting-images/{file_name}"
+    except OSError as error:
+        raise HTTPException(status_code=500, detail="问候图片保存失败，请稍后重试") from error
     finally:
         await file.close()
-    return {"success": True, "message": "问候图片上传成功", "data": {"image_url": f"/uploads/greeting-images/{file_name}"}}
+    return {"success": True, "message": "问候图片上传成功", "data": {"image_url": image_url}}
 
 
 # =========================
